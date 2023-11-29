@@ -1,0 +1,8 @@
+.ccls-cache/
+CMakeCache.txt
+CMakeFiles/
+build/
+compile_commands.json
+main/.ccls-cache/
+old/
+tags

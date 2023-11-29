@@ -1,0 +1,27 @@
+```{r}
+library(pacman)
+p_load(tidyverse,ggplot2)
+
+
+d <- read_delim("hx.csv", ": ", col_names=F)
+density(d$X2) %>% plot
+d$ix <- seq_len(nrow(d))
+
+
+
+```
+```{r}
+# ggplot(d, aes(ix, X2)) + geom_line() + geom_point()
+plot(d$ix, d$X2, type='l')
+
+```
+
+
+```{r}
+e <- read_csv("hx3.csv", col_names=T)
+
+e$ix <- seq_len(nrow(e))
+ggplot(e, aes(ix, delta)) + geom_line()
+```
+
+
