@@ -21,8 +21,8 @@
 #define INA 19
 #define INB 0
 
-// 260 RPM (60*1000 / rpm)
-#define SAT_PERIOD_MS 231
+// 1544 RPM (60*1000 / rpm)
+#define SAT_PERIOD_MS 39
 #define FWD_SAT_PERIODS 8
 #define REV_PERIODS 10
 
