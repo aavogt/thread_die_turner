@@ -224,11 +224,18 @@ void hx_motor_task() {
                                 SET_INA(bands.saturate_duty);
 
                                 // wait until PROXIMITY goes high, or the timer runss out
+                                TickType_t start = xTaskGetTickCount();
                                 ulTaskNotifyTake(ULONG_MAX, adjust * FWD_SAT_PERIODS * SAT_PERIOD_MS / portTICK_PERIOD_MS);
+                                TickType_t end = xTaskGetTickCount();
+
                                 SET_INA(0); // coast for 100 ms which avoids a brownout
                                 vTaskDelay(100 / portTICK_PERIOD_MS);
+
+                                // decide how long to reverse
+                                TickType_t rev = adjust * REV_PERIODS * SAT_PERIOD_MS / portTICK_PERIOD_MS;
+                                TickType_t fwd = end - start;
                                 SET_INB(bands.saturate_duty); // reverse
-                                vTaskDelay(adjust * REV_PERIODS * SAT_PERIOD_MS / portTICK_PERIOD_MS);
+                                vTaskDelay(MIN(rev, fwd * REV_PERIODS / FWD_SAT_PERIODS));
                                 SET_INB(0);
                                 vTaskDelay(400 / portTICK_PERIOD_MS);
                                 break;
