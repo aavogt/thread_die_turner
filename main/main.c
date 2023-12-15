@@ -168,9 +168,9 @@ void app_main(void) {
                               // and I'm not sure which one to use.
     struct bands bands = {
             .dead = 10000,
-            .creep_fwd = 50000,
+            .creep_fwd = 10000,
             .creep_fwd_duty = 1<<5,
-            .saturate_fwd = 100000,
+            .saturate_fwd = 25000,
             .saturate_duty = 1<<resolution
     };
 
