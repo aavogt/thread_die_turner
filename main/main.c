@@ -8,6 +8,7 @@
 #include "esp_flash.h"
 #include "esp_system.h"
 #include "rom/ets_sys.h"
+#include "esp_log.h"
 
 #include "driver/ledc.h"
 #include "driver/gpio.h"
@@ -26,20 +27,31 @@
 #define ROT_B 2
 #define BUTTON 5
 
+// M8 PNP NO inductive proximity sensor will pull GPIO 4 up
+// when the it is time to reverse
+#define PROXIMITY 4
+
+// default rotation
 // 1544 RPM (60*1000 / rpm)
 #define SAT_PERIOD_MS 39
 #define FWD_SAT_PERIODS 8
 #define REV_PERIODS 10
 
 
-// add ets_delay_us
+
 #define DELAY ets_delay_us(20)
+
+
+const uint32_t resolution = 10; // consider ledc_find_suitable_duty_resolution
+                                // but esp_clk_tree_src_get_freq_hz needs a clock
+                                // and I'm not sure which one to use.
+
+
 uint32_t hx711_read(void)
 {
     uint32_t count = 0;
     gpio_set_level(HX_SCK, 0);
     while (gpio_get_level(HX_DT)) {
-        printf("Waiting for HX711 to be ready\n");
         vTaskDelay(10);
     }
     portDISABLE_INTERRUPTS();
@@ -161,11 +173,19 @@ void set_adjust() {
     }
 }
 
-void app_main(void) {
+uint32_t tare = 0;
+void set_tare() {
+    for (int i=0; i<10; i++) {
+        uint32_t val = hx711_read();
+#define HX_ZERO 8000000
+        tare += val - HX_ZERO;
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+    tare /= 10;
+}
 
-    uint32_t resolution = 10; // consider ledc_find_suitable_duty_resolution
-                              // but esp_clk_tree_src_get_freq_hz needs a clock
-                              // and I'm not sure which one to use.
+TaskHandle_t hx_motor_task_hdl;
+void hx_motor_task() {
     struct bands bands = {
             .dead = 10000,
             .creep_fwd = 10000,
@@ -174,6 +194,61 @@ void app_main(void) {
             .saturate_duty = 1<<resolution
     };
 
+    SET_INA(0);
+    SET_INB(0);
+
+    while(true) {
+        int32_t diff, live;
+        uint32_t val;
+        val = hx711_read();
+
+        diff = (int32_t)(val - HX_ZERO) - (int32_t)tare;
+        live = diff - bands.dead;
+        // set creep if live is positive and less than creep_fwd
+        // then when live becomes greater than creep_fwd, set to saturate
+        // for (28ms per rotation) * 6 rotations
+        // then reverse for 28ms * 10 rotations
+        if (live > 0) {
+                SET_INA(bands.creep_fwd_duty);
+                SET_INB(0);
+                vTaskDelay(500 / portTICK_PERIOD_MS);
+                while(true) { // wait for live to exceed creep_fwd
+                        val = hx711_read();
+                        diff = (int32_t)(val - HX_ZERO) - (int32_t)tare;
+                        live = diff - bands.dead;
+                        if (live < 0) {
+                                SET_INA(0);
+                                break;
+                        }
+                        if (live > bands.saturate_fwd) {
+                                SET_INA(bands.saturate_duty);
+
+                                // wait until PROXIMITY goes high, or the timer runss out
+                                ulTaskNotifyTake(ULONG_MAX, adjust * FWD_SAT_PERIODS * SAT_PERIOD_MS / portTICK_PERIOD_MS);
+                                SET_INA(0); // coast for 100 ms which avoids a brownout
+                                vTaskDelay(100 / portTICK_PERIOD_MS);
+                                SET_INB(bands.saturate_duty); // reverse
+                                vTaskDelay(adjust * REV_PERIODS * SAT_PERIOD_MS / portTICK_PERIOD_MS);
+                                SET_INB(0);
+                                vTaskDelay(400 / portTICK_PERIOD_MS);
+                                break;
+                        }
+                        vTaskDelay(28 / portTICK_PERIOD_MS);
+                }
+    };
+    }
+}
+
+void IRAM_ATTR proximity_isr(void *arg) {
+        xTaskNotifyFromISR(hx_motor_task_hdl, (uint32_t) arg, eSetValueWithOverwrite, NULL);
+}
+
+void IRAM_ATTR button_isr(void *arg) {
+        adjust = 1.0;
+        set_tare();
+}
+
+void app_main(void) {
 
     // LEDC drives pins INA and INB
     ledc_timer_config_t ledc_timer = {
@@ -200,6 +275,9 @@ void app_main(void) {
     ledc_channel.channel = LEDC_CHANNEL_0;
     ledc_channel_config(&ledc_channel);
 
+    // allow fade on INB
+    ledc_fade_func_install(ESP_INTR_FLAG_LEVEL1);
+
     gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
 
     // set GPIO18 low, this is ground for the INB optocoupler
@@ -212,74 +290,33 @@ void app_main(void) {
     };
     gpio_config(&io_conf);
     gpio_set_level(18, 0);
-    
 
-    // initialize HX711 serial interface
     io_conf.pin_bit_mask = (1ULL<<HX_SCK);
     gpio_config(&io_conf);
     io_conf.pin_bit_mask = (1ULL<<HX_DT);
     io_conf.mode = GPIO_MODE_INPUT;
     gpio_config(&io_conf);
 
-    // here I will get a sense of how much pressure
-    // can be applied, and then translate that into PWM duty
-    // min/max are 8148131 8554261
-    // how big is the dead band? Can it shrink or grow?
+    io_conf.pin_bit_mask = (1ULL<<PROXIMITY);
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.intr_type = GPIO_INTR_POSEDGE;
+    io_conf.pull_down_en = 1;
+    gpio_config(&io_conf);
+    gpio_isr_handler_add(PROXIMITY, proximity_isr, (void *) 0);
 
-#define HX_ZERO 8000000
-    uint32_t tare = 0;
-    for (int i=0; i<10; i++) {
-        uint32_t val = hx711_read();
-        tare += val - HX_ZERO;
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    tare /= 10;
+    io_conf.pin_bit_mask = (1ULL<<BUTTON);
+    io_conf.intr_type = GPIO_INTR_NEGEDGE;
+    gpio_config(&io_conf);
+    gpio_isr_handler_add(BUTTON, button_isr, (void *) 0);
 
-    SET_INA(0);
-    SET_INB(0);
+    ec11_init();
+
+    xTaskCreate(set_adjust, "set_adjust", 2048, NULL, 0, NULL);
+
+    set_tare();
+    xTaskCreate(hx_motor_task, "hx_motor_task", 2048, NULL, 0, &hx_motor_task_hdl);
+
     while(true) {
-        
-        int32_t diff, live;
-        uint32_t val;
-        val = hx711_read();
-
-        diff = (int32_t)(val - HX_ZERO) - (int32_t)tare;
-        live = diff - bands.dead;
-        // set creep if live is positive and less than creep_fwd
-        // then when live becomes greater than creep_fwd, set to saturate
-        // for (28ms per rotation) * 6 rotations
-        // then reverse for 28ms * 10 rotations
-        if (live > 0) {
-                printf("creep fwd\n");
-                SET_INA(bands.creep_fwd_duty);
-                SET_INB(0);
-                vTaskDelay(500 / portTICK_PERIOD_MS);
-                while(true) { // wait for live to exceed creep_fwd
-                        val = hx711_read();
-                        diff = (int32_t)(val - HX_ZERO) - (int32_t)tare;
-                        live = diff - bands.dead;
-                        if (live < 0) {
-                                printf("break creep fwd\n");
-                                SET_INA(0);
-                                break;
-                        }
-                        if (live > bands.saturate_fwd) {
-                                printf("break creep fwd to saturate\n");
-                                SET_INA(bands.saturate_duty);
-                                vTaskDelay(FWD_SAT_PERIODS * SAT_PERIOD_MS / portTICK_PERIOD_MS);
-                                SET_INA(0); // coast for 100 ms which avoids a brownout
-                                vTaskDelay(100 / portTICK_PERIOD_MS);
-                                SET_INB(bands.saturate_duty); // reverse
-                                vTaskDelay(REV_PERIODS * SAT_PERIOD_MS / portTICK_PERIOD_MS);
-                                SET_INB(0);
-                                vTaskDelay(400 / portTICK_PERIOD_MS);
-                                break;
-                        }
-                        vTaskDelay(28 / portTICK_PERIOD_MS);
-                }
-    };
-    vTaskDelay(75 / portTICK_PERIOD_MS);
-    printf("%li,%li,%li,%li\n", (long int)diff, (long int) live, (long int)val, (long int)tare);
-
+        vTaskDelay(500 / portTICK_PERIOD_MS);
     }
 }
