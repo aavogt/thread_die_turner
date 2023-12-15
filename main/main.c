@@ -17,9 +17,9 @@
 #define HX_SCK 10 
 #define HX_DT 6
 
-// backwards, but this way rotation is correct (push to thread the die, pull to unthread)
-#define INA 0
-#define INB 19
+// L298N motor control connects to GPIO 19 and 0
+#define INA 19
+#define INB 0
 
 // 260 RPM (60*1000 / rpm)
 #define SAT_PERIOD_MS 231
